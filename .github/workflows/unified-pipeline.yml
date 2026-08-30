@@ -1,17 +1,12 @@
-﻿name: Daily Intelligence Pipeline
+name: Daily Intelligence Pipeline
 
-# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-# SECURITY: Only schedule and manual dispatch. NO pull_request trigger.
-# This prevents any external fork from ever executing with secrets.
-# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-on:
+on: 
   schedule:
-    # 6:00 AM IST (UTC+05:30) = 00:30 UTC every day
     - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       days_back:
-        description: 'Time window in days (default: 3)'
+        description: 'Time window in days (default: 36h)'
         required: false
         default: '36h'
 
@@ -21,14 +16,12 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 1: Checkout Runner Code ΓöÇΓöÇΓöÇΓöÇΓöÇ
-      - name: Checkout Runner Repository
+      -  name: Checkout Runner Repository
         uses: actions/checkout@v4
         with:
           path: runner
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 2: Clone Data Store ΓöÇΓöÇΓöÇΓöÇΓöÇ
-      - name: Initialize Data Store
+      -  name: Initialize Data Store
         env:
           SVC_A: ${{ secrets.CI_SVC_A }}
           SVC_STORE: ${{ secrets.CI_SVC_STORE }}
@@ -36,23 +29,19 @@ jobs:
           git clone https://x-access-token:$SVC_A@$SVC_STORE vault
           echo "Data store initialized."
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 3: Set up Python 3.11 ΓöÇΓöÇΓöÇΓöÇΓöÇ
-      - name: Set up Python 3.11
+      -  name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          # no cache
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 4: Install Dependencies ΓöÇΓöÇΓöÇΓöÇΓöÇ
-      - name: Install Dependencies
+      -  name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install openpyxl requests beautifulsoup4 curl-cffi googlenewsdecoder
+          pip install -r runner/requirements.txt
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 5: Execute Pipeline ΓöÇΓöÇΓöÇΓöÇΓöÇ
       - name: Execute Pipeline
         env:
-          DAYS_BACK: ${{ inputs.days_back || '3' }}
+          DAYS_BACK: ${{ inputs.days_back || '36h' }}
           PYTHONUNBUFFERED: '1'
           SVC_A: ${{ secrets.CI_SVC_A }}
           SVC_B: ${{ secrets.CI_SVC_B }}
@@ -64,22 +53,21 @@ jobs:
             --vault-dir vault \
             --runner-dir runner
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 6: Commit & Push Updated Results ΓöÇΓöÇΓöÇΓöÇΓöÇ
       - name: Sync Results
         env:
           SVC_A: ${{ secrets.CI_SVC_A }}
+          SVC_STORE: ${{ secrets.CI_SVC_STORE }}
         run: |
           cd vault
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n x-access-token:$SVC_A | base64)"
+          git config user.name '007ashishaggarwal-svg'
+          git config user.email '007ashishaggarwal-svg@users.noreply.github.com'
+          git remote set-url origin https://x-access-token:$SVC_A@$SVC_STORE
           git add -A
-          git diff --quiet && git diff --staged --quiet && echo "No changes." || \
-            (git commit -m "chore: sync [skip ci]" && \
+          git diff --quiet && git diff --staged --quiet && echo 'No changes.' || \
+            (git commit -m 'chore: sync intelligence updates [skip ci]' && \
              git push origin HEAD:main)
 
-      # ΓöÇΓöÇΓöÇΓöÇΓöÇ STEP 7: Upload Artifacts ΓöÇΓöÇΓöÇΓöÇΓöÇ
-      - name: Upload Artifacts
+      -  name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-output
