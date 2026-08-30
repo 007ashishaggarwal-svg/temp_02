@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: 'Checkout Runner Repository'
-        uses: actions/checkout@4
+        uses: actions/checkout@v4
         with:
           path: runner
 
@@ -67,11 +67,11 @@ jobs:
           git add -A
           git diff --quiet && git diff --staged --quiet && echo 'No changes.' || \
             (git commit -m 'chore: sync intelligence updates [skip ci]' && \
-             git push origin HEAD:main)
+             git push origin HEAD>main)
 
 
       - name: 'Upload Artifacts'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4
         with:
           name: pipeline-output
           path: |
