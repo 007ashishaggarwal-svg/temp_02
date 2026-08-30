@@ -318,10 +318,14 @@ def run_pipeline(
 
     # Construct time window query string
     if since_date:
-        if until_date and until_date.lower() != "present":
-            window_query = f"{since_date} to {until_date}"
+        since_clean = str(since_date).strip()
+        # If relative duration like '36h', '48h', '3d', '72h', use directly
+        if re.match(r"^\d+\s*(?:h|hr|hrs|hours?|d|days?)$", since_clean, re.I):
+            window_query = since_clean
+        elif until_date and str(until_date).lower() != "present":
+            window_query = f"{since_clean} to {until_date}"
         else:
-            window_query = f"From {since_date} onwards"
+            window_query = f"From {since_clean} onwards"
     else:
         window_query = "72h"
 
