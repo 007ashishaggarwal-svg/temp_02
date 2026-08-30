@@ -22,7 +22,7 @@ import time
 import json
 import argparse
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import openpyxl
@@ -328,9 +328,30 @@ def run_pipeline(
     tw = create_time_window(window_query, is_admin=is_admin)
     matcher = KeywordMatcher(XLSX_PATH)
 
+    # Compute Ingestion Run Signature & Provenance
+    now_utc = datetime.now(timezone.utc)
+    # Convert UTC to IST (+05:30)
+    now_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
+    run_batch_id = f"RUN_{now_ist.strftime('%Y%m%d_%H%M')}_IST"
+    ingested_date_ist = now_ist.strftime("%Y-%m-%d")
+    ingested_time_ist = now_ist.strftime("%I:%M %p IST")
+
+    # Determine Execution Run Type
+    github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    github_event = os.environ.get("GITHUB_EVENT_NAME", "").lower()
+    if github_actions:
+        if github_event == "schedule":
+            exec_run_type = "⚡ Cloud Cron (Daily 6 AM IST)"
+        else:
+            exec_run_type = "🖱️ Manual (GitHub Dispatch)"
+    else:
+        exec_run_type = "💻 Manual (Local IDE / Runner)"
+
     print("=" * 90)
     print(" 🔬 RSSFeedChecker — MASTER PRODUCTION MULTI-PILLAR INTELLIGENCE PIPELINE")
     print("=" * 90)
+    print(f"Batch Run ID:     {run_batch_id} ({exec_run_type})")
+    print(f"Ingested Time:    {ingested_date_ist} at {ingested_time_ist}")
     print(tw.format_summary())
     mode_str = "SAMPLE MODE (Quick 50-Source Test)" if is_sample else "FULL MASTER CATALOG (4,178 Active Endpoints)"
     print(f"Mode:             {mode_str}")
@@ -626,6 +647,10 @@ def run_pipeline(
             "full_text": item["full_text"],
             "event_id": f"EVT_{len(processed_feed)+1:04d}",
             "published_utc": item["published_utc"],
+            "run_batch_id": run_batch_id,
+            "ingested_date_ist": ingested_date_ist,
+            "ingested_time_ist": ingested_time_ist,
+            "exec_run_type": exec_run_type,
         })
 
     # Sort chronologically (newest first)
@@ -704,6 +729,10 @@ def run_pipeline(
                     "event_id": str(ws_old.cell(r, 20).value or f"EVT_{len(existing_items)+1:04d}"),
                     "ai_summary": str(ws_old.cell(r, 21).value or ""),
                     "implications": str(ws_old.cell(r, 22).value or ""),
+                    "run_batch_id": str(ws_old.cell(r, 23).value or ("HISTORICAL_BASELINE_IMPORT" if is_yellow else "RUN_INITIAL_BASELINE")),
+                    "ingested_date_ist": str(ws_old.cell(r, 24).value or str(val_date)[:10]),
+                    "ingested_time_ist": str(ws_old.cell(r, 25).value or (str(ws_old.cell(r, 2).value or "00:00")[:5] + " IST")),
+                    "exec_run_type": str(ws_old.cell(r, 26).value or ("📋 Baseline Historical" if is_yellow else "💻 Initial Setup Run")),
                     "is_imported": is_yellow
                 }
                 existing_items.append(item_dict)
@@ -793,6 +822,10 @@ def run_pipeline(
         ("Event UUID", 16, fill_navy),
         ("AI Summary", 55, fill_navy),
         ("Implications", 65, fill_purple),
+        ("Ingestion Batch ID", 26, fill_teal),
+        ("Ingested Date (IST)", 20, fill_navy),
+        ("Ingested Time (IST)", 20, fill_navy),
+        ("Execution Run Type", 24, fill_purple),
     ]
 
     for col_idx, (h_name, width, h_fill) in enumerate(out_headers, start=1):
@@ -928,7 +961,23 @@ def run_pipeline(
         ws_out.cell(row=r_idx, column=22, value=imp_text).font = font_data
         ws_out.cell(row=r_idx, column=22).alignment = Alignment(vertical="top", wrap_text=True)
 
-        for col_c in range(1, 23):
+        # Col 23: Ingestion Batch ID
+        ws_out.cell(row=r_idx, column=23, value=ev.get("run_batch_id", "HISTORICAL_BASELINE")).font = font_code
+        ws_out.cell(row=r_idx, column=23).alignment = Alignment(horizontal="center")
+
+        # Col 24: Ingested Date (IST)
+        ws_out.cell(row=r_idx, column=24, value=ev.get("ingested_date_ist", ev.get("published_date", ""))).font = font_bold
+        ws_out.cell(row=r_idx, column=24).alignment = Alignment(horizontal="center")
+
+        # Col 25: Ingested Time (IST)
+        ws_out.cell(row=r_idx, column=25, value=ev.get("ingested_time_ist", "00:00 IST")).font = font_data
+        ws_out.cell(row=r_idx, column=25).alignment = Alignment(horizontal="center")
+
+        # Col 26: Execution Run Type
+        ws_out.cell(row=r_idx, column=26, value=ev.get("exec_run_type", "📋 Baseline Historical")).font = font_bold
+        ws_out.cell(row=r_idx, column=26).alignment = Alignment(horizontal="center")
+
+        for col_c in range(1, 27):
             cell_c = ws_out.cell(row=r_idx, column=col_c)
             cell_c.border = thin_border
             if col_c != 1 and cell_c.fill.fill_type is None and row_fill.fill_type is not None:
@@ -937,7 +986,7 @@ def run_pipeline(
         ws_out.row_dimensions[r_idx].height = 42
 
     ws_out.freeze_panes = "A2"
-    ws_out.auto_filter.ref = f"A1:V{len(all_final_items)+1}"
+    ws_out.auto_filter.ref = f"A1:Z{len(all_final_items)+1}"
 
     # Update Live Telemetry in 01_Master_Sources_Registry
     if "01_Master_Sources_Registry" in wb_out.sheetnames and GLOBAL_AUDIT_TELEMETRY:
