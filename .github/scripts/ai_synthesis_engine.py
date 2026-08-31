@@ -1,290 +1,238 @@
 #!/usr/bin/env python3
 """
-AI Synthesis & Biopharma CI Strategic Implications Engine
-=========================================================
-1. Factual Summary (< 70 words):
-   - Integrates AI REST API (if service key is configured in environment).
-   - High-precision NLP synthesis engine that purges journalistic bylines, boilerplate,
-     and datelines, synthesizing clean, factual, professional executive summaries (< 70 words).
+ENTERPRISE MULTI-PROVIDER AI SYNTHESIS & DUAL-QUOTA POOL ENGINE
+==============================================================
+Supported Providers:
+1. Google Gemini Flash (Dual/Multi-Key Pool with Round-Robin & 429 Failover)
+2. Cloudflare Workers AI (Llama 3.3 70B / Llama 3.1 8B Edge Inference)
+3. High-Density Local CI Natural Language Extractor (100% Deterministic)
 
-2. Competitive Implications (< 70 words):
-   - Top-tier Biopharma CI Analyst insight (Umer Raffat / Geoffrey Porges / Jacob Plieth style).
-   - Evidence-led, commercially sharp, clinically/mechanistically aware.
-   - Interprets: What changed, why it matters, and strategic implications (< 70 words).
+Features:
+- Dual/Multi-Key Round-Robin for Gemini (doubles/triples RPM and RPD quotas)
+- Zero-Cost Edge Inference via Cloudflare Workers AI (10,000 Neurons/day free)
+- Automatic Cascading Failover (Primary -> Secondary -> Tertiary)
+- Granular Provenance Tagging per row
 """
 
 import os
+import sys
 import re
-import html
 import json
+import time
 import urllib.request
-import urllib.parse
-from datetime import datetime
+import itertools
 
-# Read from masked env var (CI_SVC_B in runner) with fallback for local dev
-_API_KEY = os.environ.get("SVC_B") or os.environ.get("GEMINI_API_KEY", "")
-GEMINI_API_KEY = _API_KEY  # internal alias kept for compatibility
+sys.path.insert(0, os.path.dirname(__file__))
+from robust_fetcher import strip_wire_datelines, clean_snippet
+from nlp_extractor import synthesize_high_density_ci
 
+# -----------------------------------------------------------------------------
+# 1. CREDENTIALS & KEY POOLS
+# -----------------------------------------------------------------------------
+# Read keys from environment variables or local Secrets fallback
+def get_secret_keys():
+    gemini_keys = []
+    # Check env vars (CI_SVC series)
+    for k in ["CI_SVC_B", "CI_SVC_C", "GEMINI_API_KEY"]:
+        v = os.environ.get(k, "").strip()
+        if v and v not in gemini_keys:
+            gemini_keys.append(v)
+            
+    # Check Cloudflare env vars (CI_SVC series)
+    cf_account_id = os.environ.get("CI_SVC_D", "").strip() or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_api_token = os.environ.get("CI_SVC_E", "").strip() or os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 
-def clean_text_input(t: str) -> str:
-    if not t:
-        return ""
-    txt = html.unescape(str(t)).strip()
-    if "&lt;" in txt or "&gt;" in txt or "&amp;" in txt:
-        txt = html.unescape(txt)
-    txt = re.sub(r'<(?:figure|script|style|svg)[^>]*>.*?</(?:figure|script|style|svg)>', ' ', txt, flags=re.DOTALL | re.IGNORECASE)
-    txt = re.sub(r'<[^>]+>', ' ', txt)
+    # Check Secrets.txt file if present locally
+    sec_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Secrets.txt"))
     
-    # Strip common journalistic boilerplate, bylines, and dates
-    txt = re.sub(r'Written by [^|.\n]+(?:\|\s*[A-Za-z]+\.?\s*\d{1,2},?\s*\d{4})?', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'By\s+[A-Za-z\s,.\-–—]+(?:\|\s*[A-Za-z]+\.?\s*\d{1,2},?\s*\d{4})?', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'Photo (?:credit|by):?[^\n.]+', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'Published:?\s*[A-Za-z]+\s+\d{1,2},\s+\d{4}', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'Source:\s*\[?[^\]\n]+\]?', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'\[headline-only\]', '', txt, flags=re.IGNORECASE)
-    txt = re.sub(r'\bGN-[A-Za-z0-9_\-]+\b', '', txt)
-    txt = re.sub(r'\bRSS-[A-Za-z0-9_\-]+\b', '', txt)
+    if os.path.exists(sec_path):
+        try:
+            with open(sec_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                # Find Gemini keys
+                m_keys = re.findall(r"(?:AQ\.[A-Za-z0-9_-]{40,}|AIzaSy[A-Za-z0-9_-]{33})", content)
+                for k in m_keys:
+                    if k not in gemini_keys:
+                        gemini_keys.append(k)
+                        
+                # Find Cloudflare credentials if recorded
+                m_cf_acc = re.search(r"CLOUDFLARE_ACCOUNT_ID\s*[:=]\s*([a-f0-9]{32})", content, re.I)
+                if m_cf_acc and not cf_account_id:
+                    cf_account_id = m_cf_acc.group(1).strip()
+                    
+                m_cf_tok = re.search(r"CLOUDFLARE_API_TOKEN\s*[:=]\s*([A-Za-z0-9_-]{35,})", content, re.I)
+                if m_cf_tok and not cf_api_token:
+                    cf_api_token = m_cf_tok.group(1).strip()
+        except Exception:
+            pass
+            
+    # Return discovered keys from environment / Secrets.txt
+    return gemini_keys, cf_account_id, cf_api_token
+
+# Initialize Key Pools
+GEMINI_KEYS, CF_ACCOUNT_ID, CF_API_TOKEN = get_secret_keys()
+_gemini_key_cycle = itertools.cycle(GEMINI_KEYS) if GEMINI_KEYS else None
+
+# -----------------------------------------------------------------------------
+# 2. PROMPT BUILDER
+# -----------------------------------------------------------------------------
+def build_grounded_prompt(title: str, company: str, desk: str, snippet: str, full_text: str) -> str:
+    context = full_text if (full_text and len(full_text) > 150) else (snippet if snippet else title)
+    context = strip_wire_datelines(context)[:3200]
+    return f"""You are a Senior Biopharmaceutical Competitive Intelligence (CI) Analyst.
+Synthesize this pharmaceutical/clinical event into exactly two structured sections based STRICTLY on the facts provided below. Do not hallucinate or repeat generic templates.
+
+Headline: {title}
+Company: {company}
+Desk: {desk}
+Source Text:
+\"\"\"
+{context}
+\"\"\"
+
+Output format must be strictly valid JSON:
+{{
+  "ai_summary": "A comprehensive 3-to-4 sentence summary detailing (1) the core milestone, drug candidate (INN), MOA/target, and sponsor; (2) clinical trial phase/NCT ID or deal terms; (3) quantitative efficacy/safety data and next regulatory milestone.",
+  "implications": "A precise 2-sentence CI analysis detailing (1) impact on standard-of-care benchmarks and competitor positioning in {desk}; (2) commercial market access or dosing differentiation."
+}}
+Return ONLY valid JSON."""
+
+# -----------------------------------------------------------------------------
+# 3. ENGINE 1: DUAL-KEY ROUND-ROBIN GEMINI FLASH
+# -----------------------------------------------------------------------------
+def generate_gemini_flash(title: str, company: str, desk: str, snippet: str, full_text: str):
+    """Calls Google Gemini Flash using multi-key round-robin with automatic failover."""
+    global GEMINI_KEYS
+    if not GEMINI_KEYS:
+        return None, None, "No Gemini API Keys configured"
+        
+    prompt = build_grounded_prompt(title, company, desk, snippet, full_text)
     
-    txt = re.sub(r'\s+', ' ', txt).strip()
-    return txt
-
-
-def clamp_words(text: str, max_words: int = 68) -> str:
-    """Ensure output does not exceed word limit while maintaining complete sentences."""
-    words = text.strip().split()
-    if len(words) <= max_words:
-        return text.strip()
-    
-    trimmed = " ".join(words[:max_words])
-    last_period = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-    if last_period > len(trimmed) * 0.65:
-        return trimmed[:last_period + 1].strip()
-    return trimmed.rstrip(",;:- ") + "."
-
-
-def call_gemini_api(prompt: str, timeout: int = 5) -> str:
-    """Calls Gemini REST API directly if GEMINI_API_KEY is configured in environment."""
-    if not GEMINI_API_KEY:
-        return ""
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-        headers = {"Content-Type": "application/json"}
+    # Try all available keys before failing
+    for key_idx, api_key in enumerate(GEMINI_KEYS, start=1):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 150}
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 350
+            }
         }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        return ""
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                raw_text = res["candidates"][0]["content"]["parts"][0]["text"]
+                m_json = re.search(r"\{.*\}", raw_text, re.DOTALL)
+                if m_json:
+                    parsed = json.loads(m_json.group(0))
+                    ai_s = parsed.get("ai_summary", "")
+                    imp = parsed.get("implications", "")
+                    if len(ai_s) > 100 and len(imp) > 40:
+                        prov_tag = f"⚡ Google Gemini 2.5 Flash (Key #{key_idx})" if len(GEMINI_KEYS) > 1 else "⚡ Google Gemini 2.5 Flash"
+                        return ai_s, imp, prov_tag
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Rate limited on this key, immediately try next key in pool
+                continue
+        except Exception:
+            continue
+            
+    return None, None, "Gemini Quota Exceeded / Unavailable"
 
-
-def generate_factual_ai_summary(
-    headline: str,
-    url: str,
-    snippet: str,
-    full_text: str = "",
-    source_name: str = "",
-    desk: str = "",
-    signal_type: str = ""
-) -> str:
-    """
-    Generates a direct, fact-first executive summary (< 70 words).
-    Starts directly with the biopharma fact, sponsor, or drug asset.
-    """
-    h_clean = clean_text_input(headline)
-    # Strip trailing publisher suffix from headline if present (e.g. - Yahoo Finance)
-    h_clean = re.sub(r'\s+-\s+[A-Za-z0-9\s\.\!&–—\']+$', '', h_clean).strip()
+# -----------------------------------------------------------------------------
+# 4. ENGINE 2: CLOUDFLARE WORKERS AI (LLAMA 3.3 70B / LLAMA 3.1 8B EDGE)
+# -----------------------------------------------------------------------------
+def generate_cloudflare_ai(title: str, company: str, desk: str, snippet: str, full_text: str):
+    """Calls Cloudflare Workers AI Edge Inference API ($0.00 / 10,000 Free Neurons/day)."""
+    _, account_id, api_token = get_secret_keys()
+    if not account_id or not api_token:
+        return None, None, "Cloudflare Account ID / API Token not configured"
+        
+    prompt = build_grounded_prompt(title, company, desk, snippet, full_text)
     
-    s_clean = clean_text_input(snippet)
-    f_clean = clean_text_input(full_text)
-    lead_source = source_name or "Trade Press"
-    if "GN-" in lead_source or "RSS-" in lead_source:
-        lead_source = "Biopharma Newsroom"
-    desk_clean = desk.replace(" Desk", "").strip() if desk else "Biopharma"
-
-    # Try Gemini API if key available
-    if GEMINI_API_KEY:
-        prompt = (
-            "Write a single, factual, high-quality biopharma news summary (< 70 words) for the following development. "
-            "Start directly with the company/sponsor, drug asset, or key milestone. "
-            "Never start with 'Source reported that' or system IDs. "
-            "Include company, asset, phase/mechanism, and clinical/economic metrics if present.\n\n"
-            f"Headline: {h_clean}\n"
-            f"Source: {lead_source}\n"
-            f"Snippet: {s_clean[:350]}\n"
-            f"Full Text Excerpt: {f_clean[:500]}"
-        )
-        gemini_res = call_gemini_api(prompt)
-        if gemini_res and len(gemini_res.split()) > 10:
-            return clamp_words(gemini_res, max_words=68)
-
-    # Advanced Rule-Based NLP Synthesis
-    comb = f"{h_clean} {s_clean} {f_clean}"
-
-    # Extract Key Clinical / Regulatory entities
-    m_phase = re.search(r'\b(Phase\s+[1234]|Phase\s+I{1,3}|Phase\s+IV|Pivotal\s+Trial|PDUFA|NDA|BLA|IND|EIR|CRL|FDA\s+Approval|FDA\s+Cleared|CHMP\s+Opinion|Breakthrough\s+Therapy|Fast\s+Track|Orphan\s+Drug|CE\s+Mark)\b', comb, re.I)
-    phase_str = m_phase.group(1).title() if m_phase else ""
-
-    m_num = re.search(r'(\b\d+(\.\d+)?%\s*(?:weight\s+loss|reduction|response\s+rate|orr|pfs|os|efficacy|mace)\b|\bp\s*[<:=]\s*0\.\d+\b|\$\d+(\.\d+)?\s*(?:billion|million|B|M|/month)\b)', comb, re.I)
-    num_str = m_num.group(1) if m_num else ""
-
-    # Parse clean sentences from snippet or full text
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', s_clean) if s.strip() and len(s.strip()) > 20]
+    # Use Llama 3.3 70B or Llama 3.1 8B Instruct model
+    model = "@cf/meta/llama-3.3-70b-instruct"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
     
-    clean_sentences = []
-    for s in sentences:
-        s_low = s.lower()
-        if any(bad in s_low for bad in ["written by", "photo credit", "all rights reserved", "subscribe to", "read more", "celebrated our", "gn-"]):
-            continue
-        if s_clean.lower().count(s_low[:30]) > 1:
-            continue
-        if h_clean.lower() in s_low and len(s_low) <= len(h_clean) + 10:
-            continue
-        clean_sentences.append(s)
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are a Senior Biopharmaceutical CI Analyst. Output strictly valid JSON with keys ai_summary and implications."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 350
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            if res.get("success"):
+                raw_text = res.get("result", {}).get("response", "")
+                m_json = re.search(r"\{.*\}", raw_text, re.DOTALL)
+                if m_json:
+                    parsed = json.loads(m_json.group(0))
+                    ai_s = parsed.get("ai_summary", "")
+                    imp = parsed.get("implications", "")
+                    if len(ai_s) > 100 and len(imp) > 40:
+                        return ai_s, imp, "🧠 Cloudflare Workers AI (Llama 3.3 70B Edge)"
+    except Exception as e:
+        pass
+        
+    return None, None, "Cloudflare Workers AI Unavailable"
 
-    if clean_sentences and len(clean_sentences[0].split()) >= 10:
-        first_s = clean_sentences[0]
-        if h_clean.lower() in first_s.lower():
-            raw_summary = first_s
-        else:
-            raw_summary = f"{h_clean}. {first_s}"
-    else:
-        # Build direct fact-first biopharma sentence
-        s_parts = [f"{h_clean}."]
-        if phase_str and phase_str.lower() not in h_clean.lower():
-            s_parts.append(f"The program is advancing in {phase_str} clinical evaluation.")
-        elif num_str and num_str.lower() not in h_clean.lower():
-            s_parts.append(f"The asset demonstrated notable therapeutic impact ({num_str}).")
-        else:
-            s_parts.append(f"This represents a key developmental milestone within {desk_clean}.")
-        raw_summary = " ".join(s_parts)
+# -----------------------------------------------------------------------------
+# 5. ENGINE 3: HIGH-DENSITY LOCAL DETERMINISTIC EXTRACTOR (100% RELIABLE)
+# -----------------------------------------------------------------------------
+def generate_local_extractor(title: str, company: str, desk: str, snippet: str, full_text: str):
+    """Executes high-density local clinical and strategic NLP extraction."""
+    ai_s, imp = synthesize_high_density_ci(title, company, desk, snippet, full_text)
+    return ai_s, imp, "🔬 Local High-Density CI Extractor"
 
-    raw_summary = re.sub(r'\s+', ' ', raw_summary).strip()
-    return clamp_words(raw_summary, max_words=68)
-
-
-def generate_ci_competitive_implications(
-    headline: str,
-    url: str,
-    snippet: str,
-    full_text: str = "",
-    source_name: str = "",
-    desk: str = "",
-    signal_type: str = "",
-    matched_keywords: str = ""
-) -> str:
+# -----------------------------------------------------------------------------
+# 6. UNIFIED CASCADE ROUTER
+# -----------------------------------------------------------------------------
+def synthesize_event(title: str, company: str, desk: str, snippet: str, full_text: str,
+                     primary_mode: str = "Option B", secondary_mode: str = "Option A",
+                     priority_tier: str = "Tier 1"):
     """
-    Generates a top-tier Biopharma CI Analyst insight (< 70 words).
-    Interprets: What changed, why it matters, and strategic implications for payers, market access, or rival pipelines.
+    Synthesizes an event according to the user's priority cascade configuration.
     """
-    h_clean = clean_text_input(headline)
-    s_clean = clean_text_input(snippet)
-    f_clean = clean_text_input(full_text)
-    comb = f"{h_clean} {s_clean} {f_clean}".lower()
-    desk_name = desk.replace(" Desk", "").strip() if desk else "Biopharma"
-
-    # Try Gemini API if key available
-    if GEMINI_API_KEY:
-        prompt = (
-            "Using current evidence, write a ≤68-word competitive strategic insight. "
-            "Think like a top-tier biopharma CI analyst (e.g., Umer Raffat, Geoffrey Porges, Jacob Plieth): "
-            "evidence-led, commercially sharp, and clinically/mechanistically aware.\n"
-            "Do not summarize—interpret the competitive significance: what changed, why it matters, and strategic implications.\n\n"
-            f"Headline: {h_clean}\n"
-            f"Desk: {desk_name}\n"
-            f"Signal: {signal_type}\n"
-            f"Details: {s_clean[:400]}"
-        )
-        gemini_imp = call_gemini_api(prompt)
-        if gemini_imp and len(gemini_imp.split()) > 10:
-            return clamp_words(gemini_imp, max_words=68)
-
-    # Category 1: Health Economics / HEOR / Payer Coverage / Pricing
-    if any(w in comb for w in ["heor", "cost offset", "medicare", "medicaid", "hospitalization", "pricing", "mfn", "reimbursement", "payer", "ira", "negotiated"]):
-        if any(w in comb for w in ["zepbound", "wegovy", "glp-1", "hospital", "cost offset"]):
-            implication = (
-                "Provides critical actuarial proof to justify Medicare, Medicaid, and commercial employer coverage. "
-                "Quantifying acute care cost offsets directly dismantles payer pushback over high upfront drug costs by demonstrating immediate downstream medical expenditure savings."
-            )
-        elif any(w in comb for w in ["mfn", "white house", "reference price", "pricing reform"]):
-            implication = (
-                "Signals expanding federal pressure on drug pricing beyond top Medicare-negotiated drugs into mid-tier biopharma. "
-                "Broad international reference pricing could compress operating margins and alter launch pricing strategies for emerging specialty entrants."
-            )
+    clean_s = strip_wire_datelines(clean_snippet(snippet))
+    clean_f = strip_wire_datelines(full_text) if full_text else clean_s
+    
+    # Define engine dispatcher
+    def run_engine(mode_str):
+        if "Option B" in mode_str:
+            return generate_gemini_flash(title, company, desk, clean_s, clean_f)
+        elif "Option C" in mode_str:
+            return generate_cloudflare_ai(title, company, desk, clean_s, clean_f)
         else:
-            implication = (
-                "Strengthens manufacturer negotiating leverage during formulary reviews by linking clinical efficacy to direct healthcare cost savings. "
-                "Demonstrating quantifiable economic offsets reduces payer restrictions and accelerates commercial tier placement."
-            )
-
-    # Category 2: Metabolic, Obesity, GLP-1/GIP, Diabetes, Cardiometabolic
-    elif "Metabolic" in desk_name or "Obesity" in desk_name or any(w in comb for w in ["obesity", "glp-1", "tirzepatide", "semaglutide", "incretin", "weight loss", "cagrisema", "dd18"]):
-        if any(w in comb for w in ["sensor", "wearable", "glucose", "ketone", "dka", "device"]):
-            implication = (
-                "Significantly de-risks metabolic and diabetes management, particularly for patients on intensive combination therapies at risk of metabolic complications. "
-                "Represents a major technology upgrade for integrated continuous cardiometabolic monitoring."
-            )
-        elif any(w in comb for w in ["phase 3", "positive", "weight loss", "efficacy", "oral"]):
-            implication = (
-                "Directly challenges incumbent GLP-1 leaders on efficacy magnitude, tolerability profile, or oral dosing convenience. "
-                "Tightens the commercial differentiation window for next-generation incretins and raises the clinical bar for maintenance regimens."
-            )
-        elif any(w in comb for w in ["deal", "acquire", "license", "partner", "buyout"]):
-            implication = (
-                "Accelerates clinical pipeline access as large-cap drugmakers seek diversified non-incretin and oral assets ahead of patent expirations. "
-                "Increases premium valuations for clinical-stage metabolic biotechs."
-            )
-        else:
-            implication = (
-                "Reinforces competitive intensity across metabolic indications, where differentiation on lean mass preservation, dosing intervals, and cardiovascular benefits dictates long-term market leadership."
-            )
-
-    # Category 3: Cardiovascular / Inflammation / Vaccines / Epidemiology
-    elif any(w in comb for w in ["cardiovascular", "mace", "stroke", "infarction", "shingrix", "vaccine", "heart failure"]):
-        implication = (
-            "Highlights the systemic vascular benefits of suppressing chronic inflammation in aging and cardiometabolic populations. "
-            "Adds weight to the paradigm that mitigating inflammatory triggers provides additive cardiovascular risk reduction alongside standard metabolic therapies."
-        )
-
-    # Category 4: Oncology / Myeloma / Lung Cancer / ADCs
-    elif "Oncology" in desk_name or "Myeloma" in desk_name or any(w in comb for w in ["oncology", "cancer", "nsclc", "sclc", "myeloma", "adc", "car-t"]):
-        if any(w in comb for w in ["approval", "cleared", "bla", "nda", "fda"]):
-            implication = (
-                "Reshapes standard-of-care lines in refractory patient subsets, intensifying competitive pressure on incumbent targeted therapies. "
-                "Commercial traction will hinge on real-world progression-free survival and favorable toxicity management."
-            )
-        elif any(w in comb for w in ["fail", "missed", "hold", "halt", "crl"]):
-            implication = (
-                "Creates an immediate commercial opening for competing targeted and ADC programs in the same treatment line, prompting strategic reallocation of pipeline capital toward derisked combination assets."
-            )
-        else:
-            implication = (
-                "Highlights accelerating competition across next-generation targeted modalities. "
-                "Establishing superior overall survival and manageable safety profiles will determine first-line market access against established standards."
-            )
-
-    # Category 5: Neuroscience / CNS / ALS / Alzheimer's / Rare Diseases
-    elif "Neuroscience" in desk_name or "CNS" in desk_name or any(w in comb for w in ["neuro", "cns", "als", "alzheimer", "parkinson", "rare"]):
-        implication = (
-            "Marks a critical clinical inflection in a high-unmet-need CNS indication where disease-modifying therapies command premium pricing. "
-            "Commercial adoption depends heavily on biomarker validation, patient identification infrastructure, and long-term safety monitoring."
-        )
-
-    # Category 6: Corporate Strategy & M&A / Partnerships
-    elif "Corporate" in desk_name or any(w in comb for w in ["acquire", "deal", "licensing", "restructuring", "layoff", "pipeline"]):
-        implication = (
-            "Reflects strategic portfolio prioritization and capital redeployment toward high-conviction clinical assets. "
-            "Signals potential follow-on licensing deals or asset divestitures as large-cap players optimize therapeutic focus."
-        )
-
-    # General Biopharma CI Insight
-    else:
-        implication = (
-            f"Provides actionable intelligence on pipeline momentum and regulatory milestones for {source_name or 'monitored entities'}. "
-            "Near-term catalyst readouts will define competitive standing and market positioning within this indication."
-        )
-
-    return clamp_words(implication, max_words=68)
+            return generate_local_extractor(title, company, desk, clean_s, clean_f)
+            
+    # 1. Attempt Primary Engine
+    ai_txt, imp_txt, prov = run_engine(primary_mode)
+    if ai_txt and imp_txt:
+        return ai_txt, imp_txt, prov
+        
+    # 2. Attempt Secondary Failover Engine
+    if secondary_mode and "None" not in secondary_mode:
+        ai_txt, imp_txt, prov = run_engine(secondary_mode)
+        if ai_txt and imp_txt:
+            return ai_txt, imp_txt, f"{prov} (Failover)"
+            
+    # 3. Ultimate Fallback to Local High-Density Extractor
+    ai_txt, imp_txt, prov = generate_local_extractor(title, company, desk, clean_s, clean_f)
+    return ai_txt, imp_txt, f"{prov} (Fallback)"

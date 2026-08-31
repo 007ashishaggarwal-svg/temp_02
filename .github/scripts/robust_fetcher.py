@@ -845,46 +845,88 @@ def clean_extracted_full_text(text: str) -> str:
     return "\n\n".join(cleaned_lines)
 
 
-def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars: int = 5000, timeout: int = 8) -> str:
+def strip_wire_datelines(text: str) -> str:
     """
-    State-of-the-art 4-Tier Web Page Full-Text Extractor:
-    Tier 1: Structured JSON-LD (schema.org/NewsArticle -> articleBody)
-    Tier 2: Semantic HTML Main Body Containers (<article>, <main>, itemprop="articleBody", .story-body)
-    Tier 3: Paragraph Traversal & Boilerplate Stripper
-    Tier 4: Graceful Fallback to clean editorial snippet
+    Strips raw PR wire datelines and agency prefixes, e.g.:
+    - 'MANASSAS, Va., Aug. 29, 2026 /PRNewswire/ -- '
+    - 'NEW YORK & LYON, France, le 14 aot 2026, Pfizer Inc. -- '
+    - 'SOUTH SAN FRANCISCO, Calif., Aug. 25, 2026 /GlobeNewswire/ -- '
+    - 'BOSTON--(BUSINESS WIRE)--'
+    - '(MedPage Today) -- '
     """
-    if not url or not url.startswith("http"):
-        return fallback_snippet
+    if not text:
+        return ""
+    # Pattern for PRNewswire / GlobeNewswire / BusinessWire / MedPage prefixes
+    t = re.sub(r"^[A-Z\s\.,&/-]+(?:,\s*[A-Za-z\s]+)?\s*,\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|le\s+\d+)[^/]*?/(?:PRNewswire|GlobeNewswire|PR Newswire|Business Wire|PRweb)/?\s*[-–—]+\s*", "", text, flags=re.I)
+    t = re.sub(r"^[A-Z\s\.,&/-]+--\s*\(?(?:BUSINESS WIRE|GlobeNewswire|PR NEWSWIRE)\)?\s*--\s*", "", t, flags=re.I)
+    t = re.sub(r"^\((?:MedPage Today|BioSpace|Fierce Pharma|STAT)\)\s*[-–—]+\s*", "", t, flags=re.I)
+    t = re.sub(r"^([A-Z\s,]+,\s*[A-Z]{2}\s*[-–—]\s*)", "", t)
+    return t.strip()
 
+
+def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars: int = 5000, timeout: int = 10) -> str:
+    """
+    State-of-the-art 5-Tier Web Page Full-Text Extractor with curl_cffi Chrome Impersonation:
+    Tier 1: curl_cffi Chrome 124 TLS Handshake (bypasses Cloudflare Turnstile / Akamai 403s)
+    Tier 2: Structured JSON-LD (schema.org/NewsArticle -> articleBody)
+    Tier 3: Semantic HTML Main Body Containers (<article>, <main>, itemprop="articleBody", .story-body)
+    Tier 4: Paragraph Traversal & Boilerplate Stripper
+    Tier 5: Graceful Fallback to clean editorial snippet with stripped wire datelines
+    """
+    clean_fallback = strip_wire_datelines(clean_snippet(fallback_snippet))
+    if not url or not url.startswith("http"):
+        return clean_fallback
+
+    html_str = ""
+    # 1. Attempt Chrome TLS Impersonation via curl_cffi
     try:
-        req = urllib.request.Request(
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get(
             url,
+            impersonate="chrome124",
+            timeout=timeout,
             headers={
-                "User-Agent": UA_CHROME,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1"
             }
         )
-        with urllib.request.urlopen(req, timeout=timeout, context=_LAX_SSL) as resp:
-            html_bytes = resp.read()
-            html_str = html_bytes.decode("utf-8", "ignore")
+        if resp.status_code == 200:
+            html_str = resp.text
+    except Exception:
+        pass
 
-        if not HAS_BS4:
-            # Fault-tolerant regex fallback if BeautifulSoup unavailable
-            p_matches = re.findall(r"<p\b[^>]*>(.*?)</p>", html_str, re.I | re.DOTALL)
-            clean_ps = [clean_snippet(p) for p in p_matches if len(p) > 30]
-            if clean_ps:
-                return "\n\n".join(clean_ps)[:max_chars]
-            return fallback_snippet
+    # 2. Fallback to urllib if curl_cffi didn't return HTML
+    if not html_str:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": UA_CHROME,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=timeout, context=_LAX_SSL) as resp:
+                html_bytes = resp.read()
+                html_str = html_bytes.decode("utf-8", "ignore")
+        except Exception:
+            pass
 
+    if not html_str:
+        return clean_fallback
+
+    if not HAS_BS4:
+        p_matches = re.findall(r"<p\b[^>]*>(.*?)</p>", html_str, re.I | re.DOTALL)
+        clean_ps = [strip_wire_datelines(clean_snippet(p)) for p in p_matches if len(p) > 30]
+        if clean_ps:
+            return "\n\n".join(clean_ps)[:max_chars]
+        return clean_fallback
+
+    try:
         soup = BeautifulSoup(html_str, "html.parser")
 
         # ---------------------------------------------------------------------
@@ -898,7 +940,7 @@ def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars
                     if isinstance(item, dict):
                         art_body = item.get("articleBody") or item.get("text")
                         if art_body and len(art_body) > 250:
-                            cleaned = clean_extracted_full_text(art_body)
+                            cleaned = clean_extracted_full_text(strip_wire_datelines(art_body))
                             if len(cleaned) > 200:
                                 return cleaned[:max_chars]
             except Exception:
@@ -915,14 +957,15 @@ def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars
             candidate_containers.append(el)
 
         candidate_containers.extend(soup.find_all(attrs={"itemprop": re.compile(r"articleBody|text", re.I)}))
-        candidate_containers.extend(soup.find_all(class_=re.compile(r"article-body|story-body|entry-content|post-content|news-body|press-release|article__body|content-body|rich-text", re.I)))
+        candidate_containers.extend(soup.find_all(class_=re.compile(r"article-body|story-body|entry-content|post-content|news-body|press-release|article__body|content-body|rich-text|field--name-body", re.I)))
         candidate_containers.extend(soup.find_all(id=re.compile(r"article-body|story-body|entry-content|main-content", re.I)))
 
         for container in candidate_containers:
             paragraphs = []
             for p in container.find_all(["p", "h2", "h3", "li"]):
                 p_text = p.get_text(separator=" ", strip=True)
-                if len(p_text) > 30 and not re.search(r"^(copyright|all rights reserved|click here|read more|advertisement|sign up)\b", p_text, re.I):
+                p_text = strip_wire_datelines(p_text)
+                if len(p_text) > 30 and not re.search(r"^(copyright|all rights reserved|click here|read more|advertisement|sign up|forward-looking statements)\b", p_text, re.I):
                     paragraphs.append(p_text)
             
             if paragraphs:
@@ -937,8 +980,8 @@ def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars
         if body:
             p_list = []
             for p in body.find_all("p"):
-                txt = p.get_text(separator=" ", strip=True)
-                if len(txt) > 40 and not re.search(r"^(cookie|privacy|copyright|subscribe|sign in|register)\b", txt, re.I):
+                txt = strip_wire_datelines(p.get_text(separator=" ", strip=True))
+                if len(txt) > 40 and not re.search(r"^(cookie|privacy|copyright|subscribe|sign in|register|about the company)\b", txt, re.I):
                     p_list.append(txt)
             if len(p_list) >= 2:
                 combined_p = "\n\n".join(p_list)
@@ -948,7 +991,7 @@ def extract_full_article_content(url: str, fallback_snippet: str = "", max_chars
     except Exception:
         pass
 
-    return fallback_snippet
+    return clean_fallback
 
 
 # -----------------------------------------------------------------------------

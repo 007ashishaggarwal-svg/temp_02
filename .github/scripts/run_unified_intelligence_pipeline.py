@@ -58,7 +58,7 @@ except ImportError:
     def fetch_pure_sec_press_releases(*args, **kwargs): return []
     def get_sec_cik_for_ticker_or_name(q): return ""
 
-from ai_synthesis_engine import generate_factual_ai_summary, generate_ci_competitive_implications
+from ai_synthesis_engine import synthesize_event
 
 try:
     from fetch_new_clinical_trials import fetch_new_trials_for_condition
@@ -137,26 +137,70 @@ def fetch_channel_endpoint(
         if code == 200 and body_bytes:
             body_str = body_bytes.decode("utf-8", "ignore")
 
-            # Parse XML Items
-            raw_items = re.findall(r"<item\b[^>]*>(.*?)</item>", body_str, re.IGNORECASE | re.DOTALL)
-            if not raw_items:
-                raw_items = re.findall(r"<entry\b[^>]*>(.*?)</entry>", body_str, re.IGNORECASE | re.DOTALL)
+            # Parse XML Items (RSS <item>, Atom <entry>, Sitemap <url>) OR HTML Newsroom Cards
+            is_sitemap = "sitemap" in target_url.lower() or "2. XML Sitemap" in vector_label
+            is_html_newsroom = "4. HTML Newsroom" in vector_label or "HTML" in vector_label
+            
+            if is_html_newsroom:
+                raw_items = []
+                # Extract HTML article blocks, list items, or news card divs
+                html_cards = re.findall(r"<(?:article|li|div)\b[^>]*(?:news|press|release|post|item|card|article)[^>]*>(.*?)</(?:article|li|div)>", body_str, re.IGNORECASE | re.DOTALL)
+                if not html_cards:
+                    html_cards = re.findall(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", body_str, re.IGNORECASE | re.DOTALL)
+                raw_items = html_cards[:max_items]
+            elif is_sitemap:
+                raw_items = re.findall(r"<url\b[^>]*>(.*?)</url>", body_str, re.IGNORECASE | re.DOTALL)
+            else:
+                raw_items = re.findall(r"<item\b[^>]*>(.*?)</item>", body_str, re.IGNORECASE | re.DOTALL)
+                if not raw_items:
+                    raw_items = re.findall(r"<entry\b[^>]*>(.*?)</entry>", body_str, re.IGNORECASE | re.DOTALL)
 
             for raw_it in raw_items[:max_items]:
-                t_match = re.search(r"<title\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", raw_it, re.IGNORECASE | re.DOTALL)
-                l_match = re.search(r"<link\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", raw_it, re.IGNORECASE | re.DOTALL)
-                if not l_match:
-                    l_match = re.search(r'<link\b[^>]*href=["\'](.*?)["\']', raw_it, re.IGNORECASE)
-                d_match = re.search(r"<(?:pubDate|updated|dc:date)\b[^>]*>(.*?)</", raw_it, re.IGNORECASE)
-                s_match = re.search(r"<(?:description|summary|content:encoded)\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</", raw_it, re.IGNORECASE | re.DOTALL)
+                if is_html_newsroom:
+                    if isinstance(raw_it, tuple):
+                        href, text = raw_it
+                        raw_link = href if href.startswith("http") else urllib.parse.urljoin(target_url, href)
+                        raw_title = clean_snippet(text)
+                    else:
+                        a_m = re.search(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', raw_it, re.IGNORECASE | re.DOTALL)
+                        t_m = re.search(r'<h[1-4]\b[^>]*>(.*?)</h[1-4]>', raw_it, re.IGNORECASE | re.DOTALL)
+                        d_m = re.search(r'<(?:time|span|div)\b[^>]*(?:date|time)[^>]*>(.*?)</(?:time|span|div)>', raw_it, re.IGNORECASE | re.DOTALL)
+                        
+                        href = a_m.group(1).strip() if a_m else ""
+                        raw_link = href if href.startswith("http") else urllib.parse.urljoin(target_url, href) if href else ""
+                        title_text = t_m.group(1) if t_m else (a_m.group(2) if a_m else "")
+                        raw_title = clean_snippet(title_text)
+                        raw_date = d_m.group(1).strip() if d_m else ""
 
-                raw_title = clean_snippet(t_match.group(1)) if t_match else ""
-                raw_link = l_match.group(1).strip() if l_match else ""
-                raw_date = d_match.group(1).strip() if d_match else ""
-                raw_desc = clean_snippet(s_match.group(1)) if s_match else ""
+                    if not raw_title or len(raw_title) < 15 or any(nav in raw_title.lower() for nav in ["read more", "view all", "next", "previous", "learn more", "cookie", "privacy"]):
+                        continue
+                    raw_desc = ""
+                    pub_source = entity_name
+                elif is_sitemap:
+                    loc_m = re.search(r"<loc\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</loc>", raw_it, re.IGNORECASE)
+                    mod_m = re.search(r"<lastmod\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</lastmod>", raw_it, re.IGNORECASE)
+                    raw_link = loc_m.group(1).strip() if loc_m else ""
+                    raw_date = mod_m.group(1).strip() if mod_m else ""
+                    # Derive semantic headline from URL slug for sitemap items
+                    url_slug = raw_link.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ").title()
+                    raw_title = url_slug if url_slug else f"{entity_name} Press Release"
+                    raw_desc = ""
+                    pub_source = entity_name
+                else:
+                    t_match = re.search(r"<title\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", raw_it, re.IGNORECASE | re.DOTALL)
+                    l_match = re.search(r"<link\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", raw_it, re.IGNORECASE | re.DOTALL)
+                    if not l_match:
+                        l_match = re.search(r'<link\b[^>]*href=["\'](.*?)["\']', raw_it, re.IGNORECASE)
+                    d_match = re.search(r"<(?:pubDate|updated|dc:date)\b[^>]*>(.*?)</", raw_it, re.IGNORECASE)
+                    s_match = re.search(r"<(?:description|summary|content:encoded)\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</", raw_it, re.IGNORECASE | re.DOTALL)
 
-                src_match = re.search(r"<source\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", raw_it, re.IGNORECASE | re.DOTALL)
-                pub_source = clean_snippet(src_match.group(1)) if src_match else ""
+                    raw_title = clean_snippet(t_match.group(1)) if t_match else ""
+                    raw_link = l_match.group(1).strip() if l_match else ""
+                    raw_date = d_match.group(1).strip() if d_match else ""
+                    raw_desc = clean_snippet(s_match.group(1)) if s_match else ""
+
+                    src_match = re.search(r"<source\b[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", raw_it, re.IGNORECASE | re.DOTALL)
+                    pub_source = clean_snippet(src_match.group(1)) if src_match else ""
 
                 # Strip trailing publisher suffix from headline (e.g. - Yahoo Finance Australia)
                 m_suffix = re.search(r'\s+-\s+([A-Za-z0-9\s\.\!&–—\']+)\s*$', raw_title)
@@ -189,7 +233,7 @@ def fetch_channel_endpoint(
                     "published_time": pub_utc.strftime("%H:%M"),
                     "headline": raw_title,
                     "raw_url": raw_link,
-                    "snippet": raw_desc[:500],
+                    "snippet": raw_desc,
                     "full_text": raw_desc,
                     "source_name": final_source_name,
                     "source_class": source_class,
@@ -499,16 +543,17 @@ def run_pipeline(
                 "published_utc": t_utc,
                 "published_date": t["first_post_date"],
                 "published_time": "--",
-                "headline": f"{t['event_type']} {t['nct_id']} [{t['phase']}]: {clean_snippet(t['title'])}",
+                "headline": t["headline"] if "headline" in t else t.get("event_type", ""),
                 "raw_url": t["url"],
-                "snippet": f"Lead Sponsor: {t['lead_sponsor']} | Condition: {t['condition']} | Status: {t['status']}",
-                "full_text": t["summary"],
+                "snippet": t.get("summary", ""),
+                "full_text": t.get("full_body") or t.get("summary", ""),
                 "source_name": f"ClinicalTrials.gov ({t['lead_sponsor']})",
                 "source_class": e_class,
                 "discovery_method": "Pillar 3: ClinicalTrials.gov",
                 "extraction_vector": t["extraction_vector"],
                 "desk_override": desk_over,
                 "booster": booster,
+                "signal_type": t.get("signal_type", "clinical_trial_update"),
             })
             ct_count += 1
 
@@ -733,12 +778,23 @@ def run_pipeline(
                     "event_id": str(ws_old.cell(r, 20).value or f"EVT_{len(existing_items)+1:04d}"),
                     "ai_summary": str(ws_old.cell(r, 21).value or ""),
                     "implications": str(ws_old.cell(r, 22).value or ""),
-                    "run_batch_id": str(ws_old.cell(r, 23).value or ("HISTORICAL_BASELINE_IMPORT" if is_yellow else "RUN_INITIAL_BASELINE")),
-                    "ingested_date_ist": str(ws_old.cell(r, 24).value or str(val_date)[:10]),
-                    "ingested_time_ist": str(ws_old.cell(r, 25).value or (str(ws_old.cell(r, 2).value or "00:00")[:5] + " IST")),
-                    "exec_run_type": str(ws_old.cell(r, 26).value or ("📋 Baseline Historical" if is_yellow else "💻 Initial Setup Run")),
-                    "is_imported": is_yellow
                 }
+                val_c23 = str(ws_old.cell(r, 23).value or "").strip()
+                if val_c23.startswith(("RUN_", "HISTORICAL", "BATCH")):
+                    # Legacy 26-column row where Column 23 was Ingestion Batch ID
+                    item_dict["provenance"] = "🔬 Local High-Density CI Extractor"
+                    item_dict["run_batch_id"] = val_c23
+                    item_dict["ingested_date_ist"] = str(ws_old.cell(r, 24).value or str(val_date)[:10])
+                    item_dict["ingested_time_ist"] = str(ws_old.cell(r, 25).value or (str(ws_old.cell(r, 2).value or "00:00")[:5] + " IST"))
+                    item_dict["exec_run_type"] = str(ws_old.cell(r, 26).value or ("📋 Baseline Historical" if is_yellow else "💻 Initial Setup Run"))
+                else:
+                    # Canonical 27-column row
+                    item_dict["provenance"] = val_c23 or "🔬 Local High-Density CI Extractor"
+                    item_dict["run_batch_id"] = str(ws_old.cell(r, 24).value or ("HISTORICAL_BASELINE_IMPORT" if is_yellow else "RUN_INITIAL_BASELINE"))
+                    item_dict["ingested_date_ist"] = str(ws_old.cell(r, 25).value or str(val_date)[:10])
+                    item_dict["ingested_time_ist"] = str(ws_old.cell(r, 26).value or (str(ws_old.cell(r, 2).value or "00:00")[:5] + " IST"))
+                    item_dict["exec_run_type"] = str(ws_old.cell(r, 27).value or ("📋 Baseline Historical" if is_yellow else "💻 Initial Setup Run"))
+                item_dict["is_imported"] = is_yellow
                 existing_items.append(item_dict)
                 if val_url:
                     seen_urls.add(str(val_url).strip().lower())
@@ -826,6 +882,7 @@ def run_pipeline(
         ("Event UUID", 16, fill_navy),
         ("AI Summary", 55, fill_navy),
         ("Implications", 65, fill_purple),
+        ("AI Synthesis Method / Provenance", 32, fill_navy),
         ("Ingestion Batch ID", 26, fill_teal),
         ("Ingested Date (IST)", 20, fill_navy),
         ("Ingested Time (IST)", 20, fill_navy),
@@ -845,8 +902,14 @@ def run_pipeline(
     for r_idx, ev in enumerate(all_final_items, start=2):
         row_fill = fill_ice_blue if (r_idx % 2 == 0) else PatternFill(fill_type=None)
 
-        # Col 1: Date
-        c_d = ws_out.cell(row=r_idx, column=1, value=ev["published_date"])
+        # Col 1: Date (Native Excel Date for Hierarchical Tree Filtering)
+        val_d_raw = ev["published_date"]
+        try:
+            d_obj = datetime.strptime(str(val_d_raw)[:10], "%Y-%m-%d").date()
+            c_d = ws_out.cell(row=r_idx, column=1, value=d_obj)
+            c_d.number_format = "yyyy-mm-dd"
+        except Exception:
+            c_d = ws_out.cell(row=r_idx, column=1, value=val_d_raw)
         c_d.font = font_bold
         c_d.alignment = Alignment(horizontal="center")
         if ev.get("is_imported"):
@@ -940,48 +1003,67 @@ def run_pipeline(
         ws_out.cell(row=r_idx, column=20, value=ev["event_id"]).font = font_code
         ws_out.cell(row=r_idx, column=20).alignment = Alignment(horizontal="center")
 
-        # Col 21: Grounded Factual AI Summary (< 70 words)
+        # Col 21 (AI Summary), Col 22 (Implications), Col 23 (AI Synthesis Method / Provenance)
         existing_sum = ev.get("ai_summary", "")
-        if existing_sum and len(existing_sum) > 25 and not existing_sum.startswith("http"):
+        existing_imp = ev.get("implications", "")
+        existing_prov = ev.get("provenance", "")
+        
+        if existing_sum and existing_imp and len(existing_sum) > 25 and not existing_sum.startswith("http"):
             ai_sum = existing_sum
+            imp_text = existing_imp
+            prov_text = existing_prov or "🔬 Local High-Density CI Extractor"
         else:
-            ai_sum = generate_factual_ai_summary(
-                ev["headline"], ev.get("raw_url", ""), ev.get("snippet", ""), ev.get("full_text", ""),
-                source_name=ev.get("source_name", ""), desk=ev.get("desk", ""), signal_type=ev.get("signal_type", "")
+            ai_sum, imp_text, prov_text = synthesize_event(
+                title=ev["headline"],
+                company=ev.get("source_name", ""),
+                desk=ev.get("desk", ""),
+                snippet=ev.get("snippet", ""),
+                full_text=ev.get("full_text", ""),
+                primary_mode=settings.get("ai_primary_engine", "Option B"),
+                secondary_mode=settings.get("ai_failover_engine", "Option A"),
+                priority_tier=ev.get("priority", "Tier 1")
             )
+            
+        ev["ai_summary"] = ai_sum
+        ev["implications"] = imp_text
+        ev["provenance"] = prov_text
+
+        # Col 21: Grounded Factual AI Summary
         ws_out.cell(row=r_idx, column=21, value=ai_sum).font = font_data
         ws_out.cell(row=r_idx, column=21).alignment = Alignment(vertical="top", wrap_text=True)
 
-        # Col 22: CI Strategic Implications (<=80 words, analyst style)
-        existing_imp = ev.get("implications", "")
-        if existing_imp and len(existing_imp) > 20:
-            imp_text = existing_imp
-        else:
-            imp_text = generate_ci_competitive_implications(
-                ev["headline"], ev.get("raw_url", ""), ev.get("snippet", ""), ev.get("full_text", ""),
-                source_name=ev.get("source_name", ""), desk=ev.get("desk", ""), signal_type=ev.get("signal_type", ""),
-                matched_keywords=ev.get("matched_keywords", "")
-            )
+        # Col 22: CI Strategic Implications
         ws_out.cell(row=r_idx, column=22, value=imp_text).font = font_data
         ws_out.cell(row=r_idx, column=22).alignment = Alignment(vertical="top", wrap_text=True)
 
-        # Col 23: Ingestion Batch ID
-        ws_out.cell(row=r_idx, column=23, value=ev.get("run_batch_id", "HISTORICAL_BASELINE")).font = font_code
-        ws_out.cell(row=r_idx, column=23).alignment = Alignment(horizontal="center")
+        # Col 23: AI Synthesis Method / Provenance
+        ws_out.cell(row=r_idx, column=23, value=prov_text).font = font_data
+        ws_out.cell(row=r_idx, column=23).alignment = Alignment(horizontal="center", vertical="center")
 
-        # Col 24: Ingested Date (IST)
-        ws_out.cell(row=r_idx, column=24, value=ev.get("ingested_date_ist", ev.get("published_date", ""))).font = font_bold
+        # Col 24: Ingestion Batch ID
+        ws_out.cell(row=r_idx, column=24, value=ev.get("run_batch_id", "HISTORICAL_BASELINE")).font = font_code
         ws_out.cell(row=r_idx, column=24).alignment = Alignment(horizontal="center")
 
-        # Col 25: Ingested Time (IST)
-        ws_out.cell(row=r_idx, column=25, value=ev.get("ingested_time_ist", "00:00 IST")).font = font_data
-        ws_out.cell(row=r_idx, column=25).alignment = Alignment(horizontal="center")
+        # Col 25: Ingested Date (IST) (Native Date Object)
+        val_ing_d = ev.get("ingested_date_ist", ev.get("published_date", ""))
+        try:
+            d_ing_obj = datetime.strptime(str(val_ing_d)[:10], "%Y-%m-%d").date()
+            c_ing_d = ws_out.cell(row=r_idx, column=25, value=d_ing_obj)
+            c_ing_d.number_format = "yyyy-mm-dd"
+        except Exception:
+            c_ing_d = ws_out.cell(row=r_idx, column=25, value=val_ing_d)
+        c_ing_d.font = font_bold
+        c_ing_d.alignment = Alignment(horizontal="center")
 
-        # Col 26: Execution Run Type
-        ws_out.cell(row=r_idx, column=26, value=ev.get("exec_run_type", "📋 Baseline Historical")).font = font_bold
+        # Col 26: Ingested Time (IST)
+        ws_out.cell(row=r_idx, column=26, value=ev.get("ingested_time_ist", "00:00 IST")).font = font_data
         ws_out.cell(row=r_idx, column=26).alignment = Alignment(horizontal="center")
 
-        for col_c in range(1, 27):
+        # Col 27: Execution Run Type
+        ws_out.cell(row=r_idx, column=27, value=ev.get("exec_run_type", "📋 Baseline Historical")).font = font_bold
+        ws_out.cell(row=r_idx, column=27).alignment = Alignment(horizontal="center")
+
+        for col_c in range(1, 28):
             cell_c = ws_out.cell(row=r_idx, column=col_c)
             cell_c.border = thin_border
             if col_c != 1 and cell_c.fill.fill_type is None and row_fill.fill_type is not None:
@@ -990,7 +1072,7 @@ def run_pipeline(
         ws_out.row_dimensions[r_idx].height = 42
 
     ws_out.freeze_panes = "A2"
-    ws_out.auto_filter.ref = f"A1:Z{len(all_final_items)+1}"
+    ws_out.auto_filter.ref = f"A1:AA{len(all_final_items)+1}"
 
     # Update Live Telemetry in 01_Master_Sources_Registry
     if "01_Master_Sources_Registry" in wb_out.sheetnames and GLOBAL_AUDIT_TELEMETRY:
@@ -1049,6 +1131,8 @@ def run_pipeline(
                     cleaned[k] = re.sub(r'\s+', ' ', val).strip()
                 else:
                     cleaned[k] = v
+            cleaned["priority_tier"] = cleaned.get("priority", "🟢 Tier 3 (Weekly)")
+            cleaned["assigned_desk"] = cleaned.get("desk", "Corporate Strategy & M&A")
             return cleaned
 
         sanitized_events = [sanitize_item(ev) for ev in all_final_items]

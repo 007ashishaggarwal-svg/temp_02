@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       days_back:
-        description: 'Time window in days (default: 36h)'
+        description: 'Time window in days or hours (e.g. 24h, 36h, 48h, 7d)'
         required: false
         default: '36h'
 
@@ -29,6 +29,9 @@ jobs:
           SVC_STORE: ${{ secrets.CI_SVC_STORE }}
         run: |
           git clone https://x-access-token:$SVC_A@$SVC_STORE vault
+          cd vault
+          echo "CANONICAL VAULT COMMIT SHA: $(git rev-parse HEAD)"
+          cd ..
           echo 'Data store initialized.'
 
       - name: 'Set up Python 3.11'
@@ -45,8 +48,12 @@ jobs:
         env:
           DAYS_BACK: ${{ inputs.days_back || '36h' }}
           PYTHONUNBUFFERED: '1'
-          SVC_A: ${{ secrets.CI_SVC_A }}
-          SVC_B: ${{ secrets.CI_SVC_B }}
+          CI_SVC_A: ${{ secrets.CI_SVC_A }}
+          CI_SVC_B: ${{ secrets.CI_SVC_B }}
+          CI_SVC_C: ${{ secrets.CI_SVC_C }}
+          CI_SVC_D: ${{ secrets.CI_SVC_D }}
+          CI_SVC_E: ${{ secrets.CI_SVC_E }}
+          CI_SVC_STORE: ${{ secrets.CI_SVC_STORE }}
           VAULT_DIR: ${{ github.workspace }}/vault
           RUNNER_DIR: ${{ github.workspace }}/runner
         run: |
@@ -64,18 +71,10 @@ jobs:
           git config user.name '007ashishaggarwal-svg'
           git config user.email '007ashishaggarwal-svg@users.noreply.github.com'
           git remote set-url origin https://x-access-token:$SVC_A@$SVC_STORE
-          git add -A
-          git diff --quiet && git diff --staged --quiet && echo 'No changes.' || \
-            (git commit -m 'chore: sync intelligence updates [skip ci]' && \
-             git push origin HEAD>main)
-
-
-      - name: 'Upload Artifacts'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-output
-          path: |
-            vault/RSSFeedChecker_Master_Guide_and_Data.xlsx
-            vault/results/
-            vault/web/data/
-          retention-days: 30
+          git add RSSFeedChecker_Master_Guide_and_Data.xlsx web/data/ .cache/ results/ || true
+          if ! git diff --staged --quiet; then
+            git commit -m 'chore: sync intelligence updates [skip ci]'
+            git push origin main
+          else
+            echo 'No changes to commit.'
+          fi
