@@ -18,21 +18,22 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: 'Checkout Runner Repository'
+      - name: 'Checkout Thin Runner Repository'
         uses: actions/checkout@v4
         with:
           path: runner
 
-      - name: 'Initialize Data Store'
+      - name: 'Clone Canonical Private Data & Code Vault'
         env:
           SVC_A: ${{ secrets.CI_SVC_A }}
           SVC_STORE: ${{ secrets.CI_SVC_STORE }}
         run: |
           git clone https://x-access-token:$SVC_A@$SVC_STORE vault
           cd vault
-          echo "CANONICAL VAULT COMMIT SHA: $(git rev-parse HEAD)"
-          cd ..
-          echo 'Data store initialized.'
+          echo "CANONICAL_REPO_SHA: $(git rev-parse HEAD)"
+          cd ../runner
+          echo "RUNNER_REPO_SHA: $(git rev-parse HEAD)"
+          echo 'Canonical private vault successfully cloned.'
 
       - name: 'Set up Python 3.11'
         uses: actions/setup-python@v5
@@ -44,7 +45,7 @@ jobs:
           pip install --upgrade pip
           pip install -r runner/requirements.txt
 
-      - name: 'Execute Pipeline'
+      - name: 'Execute Canonical Pipeline from Vault'
         env:
           DAYS_BACK: ${{ inputs.days_back || '36h' }}
           PYTHONUNBUFFERED: '1'
@@ -54,20 +55,16 @@ jobs:
           CI_SVC_D: ${{ secrets.CI_SVC_D }}
           CI_SVC_E: ${{ secrets.CI_SVC_E }}
           CI_SVC_STORE: ${{ secrets.CI_SVC_STORE }}
-          VAULT_DIR: ${{ github.workspace }}/vault
-          RUNNER_DIR: ${{ github.workspace }}/runner
         run: |
-          cd ${{ github.workspace }}
-          python runner/.github/scripts/run_unified_intelligence_pipeline.py \
-            --vault-dir vault \
-            --runner-dir runner
+          cd ${{ github.workspace }}/vault
+          python .github/scripts/run_unified_intelligence_pipeline.py --since "${{ inputs.days_back || '36h' }}"
 
-      - name: 'Sync Results'
+      - name: 'Sync Results Back to Private Vault'
         env:
           SVC_A: ${{ secrets.CI_SVC_A }}
           SVC_STORE: ${{ secrets.CI_SVC_STORE }}
         run: |
-          cd vault
+          cd ${{ github.workspace }}/vault
           git config user.name '007ashishaggarwal-svg'
           git config user.email '007ashishaggarwal-svg@users.noreply.github.com'
           git remote set-url origin https://x-access-token:$SVC_A@$SVC_STORE
@@ -75,6 +72,7 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m 'chore: sync intelligence updates [skip ci]'
             git push origin main
+            echo 'Results pushed to private repository.'
           else
             echo 'No changes to commit.'
           fi
