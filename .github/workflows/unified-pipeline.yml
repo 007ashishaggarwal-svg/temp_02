@@ -71,7 +71,7 @@ jobs:
           git remote set-url origin https://x-access-token:$SVC_A@$SVC_STORE
           git add RSSFeedChecker_Master_Guide_and_Data.xlsx web/data/ .cache/ results/ || true
           if ! git diff --staged --quiet; then
-            git commit -m 'chore: sync intelligence updates [skip ci]'
+            git commit -m 'chore: sync intelligence updates'
             git push origin main
             echo 'Results pushed to private repository.'
           else
