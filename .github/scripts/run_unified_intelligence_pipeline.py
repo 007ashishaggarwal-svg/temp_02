@@ -347,8 +347,9 @@ def run_pipeline(
     output_tab_name: str = "Results",
     from_dashboard: bool = False
 ):
+    settings = load_dashboard_settings()
     if from_dashboard:
-        dash_cfg = load_dashboard_settings()
+        dash_cfg = settings
         since_date = dash_cfg["since"]
         until_date = dash_cfg["until"]
         category_filter = dash_cfg["category"]
