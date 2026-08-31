@@ -55,6 +55,7 @@ jobs:
           CI_SVC_D: ${{ secrets.CI_SVC_D }}
           CI_SVC_E: ${{ secrets.CI_SVC_E }}
           CI_SVC_STORE: ${{ secrets.CI_SVC_STORE }}
+          VAULT_DIR: ${{ github.workspace }}/vault
         run: |
           cd ${{ github.workspace }}/vault
           python .github/scripts/run_unified_intelligence_pipeline.py --since "${{ inputs.days_back || '36h' }}"
