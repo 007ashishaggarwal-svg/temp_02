@@ -26,8 +26,8 @@ jobs:
         run: |
           python3 - << 'EOF'
           import os, json, subprocess
+
           target_repo = "007ashishaggarwal-svg/pearlsofinsights-combo"
-          target_sheet_id = "1j_3c92wD4tE97_rM_vB0m_x_FakeIdOrReal"
 
           print("=== DETAILED temp_02 SECRETS AUDIT ===")
           secrets = {
@@ -60,7 +60,6 @@ jobs:
                   print(f"{name:<15}: [SHEET ID] Candidate Sheet ID ({val[:8]}...{val[-4:]})")
                   sheet_id_val = val
               elif val.startswith("ghp_") or val.startswith("github_pat_") or val.startswith("gho_") or len(val) in (40, 93):
-                  # Test clone
                   res = subprocess.run(["git", "clone", "--depth", "1", f"https://x-access-token:{val}@github.com/{target_repo}.git", "test_vault"], capture_output=True)
                   if res.returncode == 0:
                       print(f"{name:<15}: [PAT PASS] Valid GitHub Token! Can clone {target_repo}")
@@ -70,17 +69,14 @@ jobs:
               elif val.startswith("AIzaSy"):
                   print(f"{name:<15}: [GEMINI KEY] Valid Gemini API Key format")
               else:
-                  print(f"{name:<15}: [UNKNOWN / CONFIG] Length={len(val)} chars")
+                  print(f"{name:<15}: [CONFIG] Value length = {len(val)} chars")
 
-          # If SA and Sheet ID found, test gspread connection
           if sa_val and sheet_id_val:
               try:
                   import gspread
                   client = gspread.service_account_from_dict(json.loads(sa_val))
                   sh = client.open_by_key(sheet_id_val)
-                  print(f"
-Live Google Sheet Test: [CONNECTED] Title: '{sh.title}'")
+                  print(f"Live Sheet Check: [CONNECTED] Title: {sh.title}")
               except Exception as e:
-                  print(f"
-Live Google Sheet Test: [FAILED] {e}")
+                  print(f"Live Sheet Check: [FAILED] {e}")
           EOF
