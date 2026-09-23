@@ -48,14 +48,15 @@ def main():
         print("[INFO] No targets pending rescue.")
         return
 
-    # 2. Fetch target payloads using clean runner IP
+    # 2. Fetch and ingest target payloads
     fetch_headers = {
         "User-Agent": "Mozilla/5.0 (compatible; Feeder/1.0; +https://feeder.co)",
         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    relay_results = []
+    total_synced = 0
+    total_added = 0
     failed_count = 0
 
     for target in targets:
@@ -67,41 +68,25 @@ def main():
         try:
             r = requests.get(feed_url, headers=fetch_headers, timeout=20)
             if r.status_code == 200 and r.text and ("<" in r.text):
-                relay_results.append({
-                    "feed_id": feed_id,
-                    "xml": r.text
-                })
+                # Post individual feed ingest to avoid worker request timeouts
+                post_res = requests.post(
+                    ingest_url,
+                    headers=auth_headers,
+                    json={"relay_results": [{"feed_id": feed_id, "xml": r.text}]},
+                    timeout=30
+                )
+                if post_res.status_code == 200:
+                    res_data = post_res.json()
+                    total_synced += res_data.get("processed", 0)
+                    total_added += res_data.get("added", 0)
+                else:
+                    failed_count += 1
             else:
                 failed_count += 1
         except Exception:
             failed_count += 1
 
-    print(f"[INFO] Fetch complete: {len(relay_results)} succeeded, {failed_count} failed.")
-
-    if not relay_results:
-        print("[WARN] No payloads fetched.")
-        return
-
-    # 3. Post batch ingest back to endpoint
-    try:
-        post_res = requests.post(
-            ingest_url,
-            headers=auth_headers,
-            json={"relay_results": relay_results},
-            timeout=30
-        )
-        if post_res.status_code == 200:
-            res_data = post_res.json()
-            processed = res_data.get("processed", 0)
-            added = res_data.get("added", 0)
-            failed = res_data.get("failed", 0)
-            print(f"[INFO] Batch ingest complete: processed={processed}, added={added}, failed={failed}.")
-        else:
-            print(f"[ERROR] Batch ingest returned HTTP {post_res.status_code}.")
-            sys.exit(1)
-    except Exception:
-        print("[ERROR] Batch ingest request failed.")
-        sys.exit(1)
+    print(f"[INFO] Batch sync complete: {total_synced} targets processed, {total_added} entries added, {failed_count} errors.")
 
 if __name__ == "__main__":
     main()
